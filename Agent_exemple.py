@@ -5,13 +5,17 @@
 
 import json
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 
 # la cle reste dans l'env, jamais dans le code
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+
+# quota gratuit = par modele, donc si l'un est a sec (429) ou sature (503) on passe au suivant
+# dict.fromkeys = enleve les doublons en gardant l'ordre
+MODELES = list(dict.fromkeys([MODEL, "gemini-flash-lite-latest", "gemini-3.5-flash", "gemini-flash-latest"]))
 
 SYSTEM_PROMPT = (
     "Tu es un assistant qui renseigne sur les entreprises françaises. "
@@ -81,13 +85,26 @@ def appeler_gemini(historique: list) -> dict:
         "contents": historique,
         "tools": TOOLS,
     }
-    requete = urllib.request.Request(
-        GEMINI_URL,
-        data=json.dumps(corps).encode(),
-        headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
-    )
-    with urllib.request.urlopen(requete, timeout=60) as reponse:
-        return json.load(reponse)
+    data = json.dumps(corps).encode()
+
+    for modele in MODELES:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modele}:generateContent"
+        requete = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
+        )
+        try:
+            with urllib.request.urlopen(requete, timeout=60) as reponse:
+                return json.load(reponse)
+        except urllib.error.HTTPError as erreur:
+            # 429 = quota depasse, 503 = surcharge, 404 = modele retire -> on tente le suivant
+            if erreur.code in (404, 429, 503):
+                print(f"  [gemini] {modele} indisponible ({erreur.code}), modele suivant...")
+            else:
+                raise  # autre erreur (cle invalide...) : on la laisse remonter
+
+    raise RuntimeError("Tous les modeles sont indisponibles (quota ou surcharge), reessaie plus tard.")
 
 
 # --- la boucle d'agent ---
@@ -129,5 +146,9 @@ if __name__ == "__main__":
     while True:
         question = input("\nQuestion > ").strip()
         if question:
-            print("\n" + agent(question))
+            try:
+                print("\n" + agent(question))
+            except Exception as erreur:
+                # pas de crash en pleine demo : on affiche l'erreur et on continue 
+                print(f"\n[erreur] {erreur}")
 # 01:22AM
